@@ -1,0 +1,239 @@
+# You can use a m5.4xlarge + 1 EBS GP2 128GB. 
+# OS was SUSE for SAP - SUSE 12 SP3. 
+
+sudo su -
+
+#CONFIGURE 128GB EBS
+fdisk -l 
+
+fdisk /dev/nvme1n1
+n
+p
+1
+[Press ENTER]
+[Press ENTER]
+w
+mkfs -t ext3 /dev/nvme1n1
+mkdir /hana
+echo "/dev/nvme1n1 /hana ext3 errors=remount-ro 0 2" >> /etc/fstab
+mount -a
+
+mkdir /hana/backup
+mkdir /hana/tmp
+cd /hana/tmp
+
+# COPY HANA FROM S3
+aws s3 cp s3://bicas-uploads/hana2sp3.zip .
+unzip hana2sp3.zip
+
+# INSTALL 
+cd /hana/tmp/51052481/DATA_UNITS/HDB_SERVER_LINUX_X86_64
+./hdbinst 
+
+## OUTPUT AND PARAMETERS
+SAP HANA Database installation kit detected.
+
+######################################################################
+Warning: Direct usage of hdbinst is not supported. Use hdblcm instead.
+######################################################################
+
+
+
+SAP HANA Lifecycle Management - Database Installation 2.00.030.00.1522210459
+****************************************************************************
+
+
+
+Enter Local Host Name [ip-172-31-41-6]:
+Enter Installation Path [/hana/shared]:
+Enter SAP HANA System ID: DEV
+Enter Instance Number [00]:
+Enter Worker Group [default]:
+
+  Index | System Usage | Description
+  -------------------------------------------------------------------------------
+  1     | production   | System is used in a production environment
+  2     | test         | System is used for testing, not production
+  3     | development  | System is used for development, not production
+  4     | custom       | System usage is neither production, test nor development
+
+Select System Usage / Enter Index [4]:
+Enter System Administrator (devadm) Password:
+Confirm System Administrator (devadm) Password:
+Enter System Administrator Home Directory [/usr/sap/DEV/home]:
+Enter System Administrator Login Shell [/bin/sh]:
+Enter System Administrator User ID [1001]:
+Enter ID of User Group (sapsys) [79]:
+Enter Location of Data Volumes [/hana/shared/DEV/global/hdb/data]:
+Enter Location of Log Volumes [/hana/shared/DEV/global/hdb/log]:
+Restrict maximum memory allocation? [n]:
+Enter System Database User (SYSTEM) Password:
+Confirm System Database User (SYSTEM) Password:
+Restart system after machine reboot? [n]: y
+
+Summary before execution:
+   Installation Path: /hana/shared
+   SAP HANA System ID: DEV
+   Instance Number: 00
+   Database Isolation: low
+   System Usage: custom
+   System Administrator Home Directory: /usr/sap/DEV/home
+   System Administrator Login Shell: /bin/sh
+   System Administrator User ID: 1001
+   ID of User Group (sapsys): 79
+   Location of Data Volumes: /hana/shared/DEV/global/hdb/data
+   Location of Log Volumes: /hana/shared/DEV/global/hdb/log
+   Local Host Name: ip-172-31-41-6
+   Worker Group: default
+   Restart system after machine reboot?: Yes
+
+Do you want to continue? (y/n): y
+Checking installation...
+.
+.
+.
+Importing delivery unit HANA_WKLD_ANLZ
+Installation done
+Log file written to '/var/tmp/hdb_DEV_install_2019-02-07_17.42.46/hdbinst.log' on host 'ip-172-31-41-6'.
+
+## dar permissao para o usuario criado no diretorio de backup
+chown devadm:sapsys /hana/backup
+
+### FAZER O MESMO PARA O NODE 2
+Criar instancia, configurar storage, instalar HANA
+
+## COMANDOS DE START STOP
+sudo su - devadm
+./HDB stop 
+./HDB start
+
+---------- REPLICACAO 
+
+## NODE 1 
+FAzer backup da SYSTEM via HANA Studio para /hana/backup 
+
+## NODE 1 Estabalcer coomo source 
+devadm@ip-172-31-34-187:/usr/sap/DEV/HDB00> hdbnsutil -sr_enable --name=siteA
+nameserver is active, proceeding ...
+successfully enabled system as system replication source site
+done.
+
+
+## PARAR NODE 2
+./HDB stop 
+
+## COPIAR AS CHAVES DE ENCRIPTACAO DO NODE1 PARA o NODE2
+##Copy the system PKI SSFS data file and key file from the primary system to the same location on the secondary system(s):
+##/usr/sap/DEV/SYS/global/security/rsecssfs/data/SSFS_DEV.DAT
+##/usr/sap/DEV/SYS/global/security/rsecssfs/key/SSFS_DEV.KEY
+## AS ROOT NO NODE-1
+aws s3 cp /usr/sap/DEV/SYS/global/security/rsecssfs/data/SSFS_DEV.DAT s3://bicas-uploads/keys/demo1/
+aws s3 cp /usr/sap/DEV/SYS/global/security/rsecssfs/key/SSFS_DEV.KEY s3://bicas-uploads/keys/demo1/
+## AS ROOT NO NODE-2
+aws s3 cp s3://bicas-uploads/keys/demo1/SSFS_DEV.DAT /usr/sap/DEV/SYS/global/security/rsecssfs/data/SSFS_DEV.DAT
+aws s3 cp s3://bicas-uploads/keys/demo1/SSFS_DEV.KEY /usr/sap/DEV/SYS/global/security/rsecssfs/key/SSFS_DEV.KEY
+
+## NO NODE 2 as devadm confgiurar as replica 
+sudo su - devadm
+hdbnsutil -sr_register --remoteHost=ip-172-31-34-187  --remoteInstance=00 --replicationMode=async --name=siteB --operationMode=logreplay_readaccess --force_full_replica
+adding site ...
+nameserver ip-172-31-41-6:30001 not responding.
+collecting information ...
+updating local ini files ...
+done.
+./HDB start
+
+## NO NODE 1 como devadm 
+HDBSettings.sh  systemReplicationStatus.py
+
+## NO STUDIO OLHAR NA ABA LANDSCAPE -> SYSTEM REPLICATION
+
+
+## FORCAR TAKEOVER
+hdbnsutil -sr_takeover
+done.
+
+## OLHAR STATUS NODE1
+## REPLICA DESABILITADA
+devadm@ip-172-31-34-187:/usr/sap/DEV/HDB00> HDBSettings.sh  systemReplicationStatus.py
+there are no secondary sites attached
+
+Local System Replication State
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+mode: PRIMARY
+site id: 1
+site name: siteA
+
+
+## OLHAR STATUS NODE2
+## REPLICA DESABILITADA
+devadm@ip-172-31-41-6:/usr/sap/DEV/HDB00> HDBSettings.sh  systemReplicationStatus.py
+there are no secondary sites attached
+
+Local System Replication State
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+mode: PRIMARY
+site id: 2
+site name: siteB
+
+## STATUS AGORA SITES LIVRES... 
+## INSERIR ALGO NA BASE DO LADO B 
+## TEM QUE RECRIAR AO CONTRARIO
+
+## NODE1 DEFINIR COMO SEOCNDARY (ele ainda acha que é primary)
+ ./HDB stop
+ hdbnsutil -sr_register --remoteHost=ip-172-31-41-6  --remoteInstance=00 --replicationMode=async --name=siteA   --operationMode=logreplay_readaccess --force_full_replica
+./HDB start
+
+## NODE 2 
+devadm@ip-172-31-41-6:/usr/sap/DEV/HDB00> HDBSettings.sh  systemReplicationStatus.py
+| Database | Host           | Port  | Service Name | Volume ID | Site ID | Site Name | Secondary        | Secondary | Secondary | Secondary | Secondary     | Replication | Replication  | Replication                      |
+|          |                |       |              |           |         |           | Host             | Port      | Site ID   | Site Name | Active Status | Mode        | Status       | Status Details                   |
+| -------- | -------------- | ----- | ------------ | --------- | ------- | --------- | ---------------- | --------- | --------- | --------- | ------------- | ----------- | ------------ | -------------------------------- |
+| SYSTEMDB | ip-172-31-41-6 | 30001 | nameserver   |         1 |       2 | siteB     | ip-172-31-34-187 |     30001 |         1 | siteA     | YES           | ASYNC       | INITIALIZING | Full Replica: 43 % (640/1456 MB) |
+| DEV      | ip-172-31-41-6 | 30007 | xsengine     |         2 |       2 | siteB     | ip-172-31-34-187 |     30007 |         1 | siteA     | YES           | ASYNC       | INITIALIZING | Full Replica: 0 % (0/81920 KB)   |
+| DEV      | ip-172-31-41-6 | 30003 | indexserver  |         3 |       2 | siteB     | ip-172-31-34-187 |     30003 |         1 | siteA     | YES           | ASYNC       | INITIALIZING |                                  |
+
+status system replication site "1": INITIALIZING
+overall system replication status: INITIALIZING
+
+Local System Replication State
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+mode: PRIMARY
+site id: 2
+site name: siteB
+
+devadm@ip-172-31-41-6:/usr/sap/DEV/HDB00> HDBSettings.sh  systemReplicationStatus.py
+| Database | Host           | Port  | Service Name | Volume ID | Site ID | Site Name | Secondary        | Secondary | Secondary | Secondary | Secondary     | Replication | Replication | Replication    |
+|          |                |       |              |           |         |           | Host             | Port      | Site ID   | Site Name | Active Status | Mode        | Status      | Status Details |
+| -------- | -------------- | ----- | ------------ | --------- | ------- | --------- | ---------------- | --------- | --------- | --------- | ------------- | ----------- | ----------- | -------------- |
+| SYSTEMDB | ip-172-31-41-6 | 30001 | nameserver   |         1 |       2 | siteB     | ip-172-31-34-187 |     30001 |         1 | siteA     | YES           | ASYNC       | ACTIVE      |                |
+| DEV      | ip-172-31-41-6 | 30007 | xsengine     |         2 |       2 | siteB     | ip-172-31-34-187 |     30007 |         1 | siteA     | YES           | ASYNC       | ACTIVE      |                |
+| DEV      | ip-172-31-41-6 | 30003 | indexserver  |         3 |       2 | siteB     | ip-172-31-34-187 |     30003 |         1 | siteA     | YES           | ASYNC       | ACTIVE      |                |
+
+status system replication site "1": ACTIVE
+overall system replication status: ACTIVE
+
+Local System Replication State
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+mode: PRIMARY
+site id: 2
+site name: siteB
+
+
+VERIFY DATA ON HANA DB
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+devadm@ip-172-31-41-6:/usr/sap/DEV/HDB00> hdbsql
+hdbsql DEV=> SELECT * FROM Demo_HANA 
+
+
+TEST SCRIPT TO INSERT DATA ON PRIMARY HANA AND CHECK DATA ON SECONDARY HANA TO VERIFY HSR ON REAL TIME
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+watch -n5 python teste.py
+
